@@ -63,6 +63,157 @@ Resources:
       Tags: 
       - Key: Name
         Value: !Sub ${AWS::StackName}-TGW
+  #------------------ Custom Resource to pull lambda into local S3 bucket ------------------------------------------------
+  S3BucketforLambda:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub 'lambda-${AWS::StackName}-${AWS::Region}-${AWS::AccountId}'
+      Tags: 
+       - Key: Name
+         Value: !Sub ${AWS::StackName}-S3Bucket
+  S3Copy:
+    Type: Custom::CopyToS3
+    Properties:
+      ServiceToken: !GetAtt 'CopyFilesToS3.Arn'
+      S3BucketName: !Ref S3BucketforLambda
+      Urls: 
+        - https://github.com/mufaddalq/sdwan-aws/blob/master/tgwDescribe.zip?raw=true
+  CopyFilesToS3:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      Handler: index.lambda_handler
+      Timeout: 60
+      Code:
+        ZipFile:
+          Fn::Join:
+          - "\n"
+          - - ''
+            - import os
+            - import urllib.request
+            - from urllib.parse import urlparse
+            - import json
+            - import boto3
+            - import cfnresponse
+            - ''
+            - s3 = boto3.resource('s3')
+            - ''
+            - print('Loading function')
+            - ''
+            - 'def save_to_local(url):'
+            - "    urlPath = urlparse(url).path"
+            - "    fileName = os.path.basename(urlPath)"
+            - "    filePath = '/tmp/' + fileName"
+            - "    urllib.request.urlretrieve(url, filePath)"
+            - "    return filePath"
+            - ''
+            - ''
+            - 'def upload_to_s3(filePath, bucket):'
+            - "    fileName = os.path.basename(filePath)"
+            - "    s3.Object(bucket, fileName).put(Body=open(filePath, 'rb'))"
+            - ''
+            - ''
+            - 'def copy_to_s3(url, bucket):'
+            - "    filePath = save_to_local(url)"
+            - "    upload_to_s3(filePath, bucket)"
+            - ''
+            - ''
+            - 'def lambda_handler(event, context):'
+            - "    print('Received event: ' + json.dumps(event, indent=2))"
+            - ''
+            - "    if event['RequestType'] == 'Create':"
+            - "        # get the properties set in the CloudFormation resource"
+            - "        properties = event['ResourceProperties']"
+            - "        urls = properties['Urls']"
+            - "        bucket = properties['S3BucketName']"
+            - ''
+            - "        try:"
+            - "            for url in urls:"
+            - "                copy_to_s3(url, bucket)"
+            - ''
+            - "        except Exception as e:"
+            - "            print(e)"
+            - "            cfnresponse.send(event, context, cfnresponse.FAILED, {"
+            - "                             'Response': 'Failure'})"
+            - "            return"
+            - ''
+            - "    cfnresponse.send(event, context, cfnresponse.SUCCESS,"
+            - "                     {'Response': 'Success'})"
+      Runtime: python3.6
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+          Condition: {}
+      Path: /
+      Policies:
+      - PolicyName: !Sub ${AWS::StackName}-CopyFilesToS3LambdaRole
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: arn:aws:logs:*:*:*
+          - Effect: Allow
+            Action:
+            - s3:PutObject
+            - s3:DeleteObject
+            Resource: !Sub arn:aws:s3:::${S3BucketforLambda}/*
+  #------------------ Custom Resource to pull lambda into local S3 bucket ------------------------------------------------
+  cleanupBucketOnDelete:
+     Type: Custom::cleanupbucket
+     Properties:
+       ServiceToken: !GetAtt 'CopyFilesToS3.Arn'
+       BucketName: !Ref S3BucketforLambda
+  cleanupBucket:
+    Type: AWS::Lambda::Function
+    Properties:
+      Role: !GetAtt 'LambdaExecutionRole.Arn'
+      Handler: index.lambda_handler
+      Timeout: 60
+      Code:
+        ZipFile:
+          Fn::Join:
+          - "\n"
+          - - ''
+            - import json
+            - import boto3
+            - from botocore.vendored import requests
+            - ''
+            - 'def lambda_handler(event, context):'
+            - "   try:"
+            - "      bucket = event['ResourceProperties']['BucketName']"
+            - ''
+            - "      if event['RequestType'] == 'Delete':"
+            - "         s3 = boto3.resource('s3')"
+            - "         bucket = s3.Bucket(bucket)"
+            - "         for obj in bucket.objects.filter():"
+            - "            s3.Object(bucket.name, obj.key).delete()"
+            - ''
+            - "      sendResponseCfn(event, context, 'SUCCESS')"
+            - "   except Exception as e:"
+            - "      print(e)"
+            - "      sendResponseCfn(event, context, 'FAILED')"
+            - ''
+            - ''
+            - 'def sendResponseCfn(event, context, responseStatus):'
+            - "   response_body = {'Status': responseStatus,"
+            - "                    'Reason': 'Log stream name: ' + context.log_stream_name,"
+            - "                    'PhysicalResourceId': context.log_stream_name,"
+            - "                    'StackId': event['StackId'],"
+            - "                    'RequestId': event['RequestId'],"
+            - "                    'LogicalResourceId': event['LogicalResourceId'],"
+            - "                    'Data': json.loads('{}')}"
+            - "   requests.put(event['ResponseURL'], data=json.dumps(response_body))"
+      Runtime: python3.6
   #------------------ Custom Resource to get the various TGW properties needed -------------------------------------------
   LambdaBasicExecutionRole:
     Type: AWS::IAM::Role
@@ -104,13 +255,14 @@ Resources:
       stackName: !Ref "AWS::StackName"
   TransitGatewayLambda:
     Type: AWS::Lambda::Function
+    DependsOn: CopyFilesToS3
     Properties:
       Handler: tgwDescribe/lambda_function.lambda_handler
       Timeout: 60
       Role: !GetAtt 'LambdaBasicExecutionRole.Arn'
       Runtime: python3.6
       Code:
-        S3Bucket: !Sub tgw-blog-lambda-functions-us-east-1
+        S3Bucket: !Ref S3BucketforLambda
         S3Key: "tgwDescribe.zip"  
       MemorySize: 3000
   #------------------ TGW Route Tables -------------------------------------------
@@ -234,38 +386,37 @@ Resources:
     DependsOn: TransitGatewayProperties
     Properties:
       TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.HRVPC_tgw_attachment_id
-      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.HRVPC_tgw_rtb_id
+      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
   EdgeRouteTablePropagation2:
     Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
     DependsOn: TransitGatewayProperties
     Properties:
       TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.ENGVPC_tgw_attachment_id
+      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
+  HRVPCRouteTablePropagation1:
+    Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
+    DependsOn: TransitGatewayProperties
+    Properties:
+      TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn1_tgw_attachment_id
+      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.HRVPC_tgw_rtb_id
+  HRVPCRouteTablePropagation2:
+    Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
+    DependsOn: TransitGatewayProperties
+    Properties:
+      TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn2_tgw_attachment_id
+      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.HRVPC_tgw_rtb_id
+  ENGVPCRouteTablePropagation1:
+    Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
+    DependsOn: TransitGatewayProperties
+    Properties:
+      TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn1_tgw_attachment_id
       TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.ENGVPC_tgw_rtb_id
-  #------------------------Determine if these are needed ----------------------------------
-  #HRVPCRouteTablePropagation1:
-  #  Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
-  #  DependsOn: TransitGatewayProperties
-  #  Properties:
-  #    TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn1_tgw_attachment_id
-  #    TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
-  #HRVPCRouteTablePropagation2:
-  #  Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
-  #  DependsOn: TransitGatewayProperties
-  #  Properties:
-  #    TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn2_tgw_attachment_id
-  #    TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
-  #ENGVPCRouteTablePropagation1:
-  #  Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
-  #  DependsOn: TransitGatewayProperties
-  #  Properties:
-  #    TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn1_tgw_attachment_id
-  #    TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
-  #ENGVPCRouteTablePropagation2:
-  #  Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
-  #  DependsOn: TransitGatewayProperties
-  #  Properties:
-  #    TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn2_tgw_attachment_id
-  #    TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.edge_tgw_rtb_id
+  ENGVPCRouteTablePropagation2:
+    Type: "AWS::EC2::TransitGatewayRouteTablePropagation"
+    DependsOn: TransitGatewayProperties
+    Properties:
+      TransitGatewayAttachmentId: !GetAtt TransitGatewayProperties.vpn2_tgw_attachment_id
+      TransitGatewayRouteTableId: !GetAtt TransitGatewayProperties.ENGVPC_tgw_rtb_id
 Outputs:
   TransitGateway:
     Value: !Ref TransitGateway

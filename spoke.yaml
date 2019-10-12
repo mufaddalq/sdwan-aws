@@ -260,14 +260,14 @@ Resources:
         Value: Private subnet 1
       - Key: Network
         Value: Private
-  PrivateSubnet1Route:
-    Type: AWS::EC2::Route
-    Properties:
-      RouteTableId:
-        Ref: PrivateSubnet1RouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      NatGatewayId:
-        Ref: NATGateway1
+  #PrivateSubnet1Route:
+  #  Type: AWS::EC2::Route
+  #  Properties:
+  #    RouteTableId:
+  #      Ref: PrivateSubnet1RouteTable
+  #    DestinationCidrBlock: 0.0.0.0/0
+  #    NatGatewayId:
+  #      Ref: NATGateway1
   PrivateSubnet1ARouteTableAssociation:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -370,6 +370,7 @@ Resources:
           Fn::Sub: "${AWS::StackName}-LinuxHost"
       SecurityGroupIds:
         - !Ref SecurityGroup
+      SourceDestCheck: "false"
 Outputs:
   NAT1EIP:
     Description: NAT 1 IP address
