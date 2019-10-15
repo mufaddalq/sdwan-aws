@@ -63,7 +63,7 @@ Resources:
       Tags: 
       - Key: Name
         Value: !Sub ${AWS::StackName}-TGW
-  #------------------ Custom Resource to pull lambda into local S3 bucket ------------------------------------------------
+#------------------ Custom Resource to pull lambda into local S3 bucket ------------------------------------------------
   S3BucketforLambda:
     Type: "AWS::S3::Bucket"
     Properties:
@@ -137,6 +137,20 @@ Resources:
             - "                             'Response': 'Failure'})"
             - "            return"
             - ''
+            - "    if event['RequestType'] == 'Delete':"
+            - "        properties = event['ResourceProperties']"
+            - "        bucket = properties['S3BucketName']"
+            - "        bucket = s3.Bucket(bucket)"
+            - "        try:"
+            - "            for obj in bucket.objects.filter():"
+            - "                s3.Object(bucket.name, obj.key).delete()"
+            - ''
+            - "        except Exception as e:"
+            - "            print(e)"
+            - "            cfnresponse.send(event, context, cfnresponse.FAILED, {"
+            - "                             'Response': 'Failure'})"
+            - "            return"
+            - ''
             - "    cfnresponse.send(event, context, cfnresponse.SUCCESS,"
             - "                     {'Response': 'Success'})"
       Runtime: python3.6
@@ -166,54 +180,9 @@ Resources:
             Action:
             - s3:PutObject
             - s3:DeleteObject
-            Resource: !Sub arn:aws:s3:::${S3BucketforLambda}/*
-  #------------------ Custom Resource to pull lambda into local S3 bucket ------------------------------------------------
-  cleanupBucketOnDelete:
-     Type: Custom::cleanupbucket
-     Properties:
-       ServiceToken: !GetAtt 'CopyFilesToS3.Arn'
-       BucketName: !Ref S3BucketforLambda
-  cleanupBucket:
-    Type: AWS::Lambda::Function
-    Properties:
-      Role: !GetAtt 'LambdaExecutionRole.Arn'
-      Handler: index.lambda_handler
-      Timeout: 60
-      Code:
-        ZipFile:
-          Fn::Join:
-          - "\n"
-          - - ''
-            - import json
-            - import boto3
-            - from botocore.vendored import requests
-            - ''
-            - 'def lambda_handler(event, context):'
-            - "   try:"
-            - "      bucket = event['ResourceProperties']['BucketName']"
-            - ''
-            - "      if event['RequestType'] == 'Delete':"
-            - "         s3 = boto3.resource('s3')"
-            - "         bucket = s3.Bucket(bucket)"
-            - "         for obj in bucket.objects.filter():"
-            - "            s3.Object(bucket.name, obj.key).delete()"
-            - ''
-            - "      sendResponseCfn(event, context, 'SUCCESS')"
-            - "   except Exception as e:"
-            - "      print(e)"
-            - "      sendResponseCfn(event, context, 'FAILED')"
-            - ''
-            - ''
-            - 'def sendResponseCfn(event, context, responseStatus):'
-            - "   response_body = {'Status': responseStatus,"
-            - "                    'Reason': 'Log stream name: ' + context.log_stream_name,"
-            - "                    'PhysicalResourceId': context.log_stream_name,"
-            - "                    'StackId': event['StackId'],"
-            - "                    'RequestId': event['RequestId'],"
-            - "                    'LogicalResourceId': event['LogicalResourceId'],"
-            - "                    'Data': json.loads('{}')}"
-            - "   requests.put(event['ResponseURL'], data=json.dumps(response_body))"
-      Runtime: python3.6
+            - s3:ListBucket
+            - s3:ListAllMyBuckets
+            Resource: arn:aws:s3:::*
   #------------------ Custom Resource to get the various TGW properties needed -------------------------------------------
   LambdaBasicExecutionRole:
     Type: AWS::IAM::Role
